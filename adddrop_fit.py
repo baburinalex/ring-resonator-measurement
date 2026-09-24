@@ -16,8 +16,10 @@ Characterization-инструмент для РЕАЛЬНЫХ спектров a
     phi = 2 pi n_g L / lambda
 
 Свободные параметры на окно: t, a, n_g*L, начальная фаза и квадратичная
-огибающая env (грейтинги/юстировка). offset — тёмновой уровень детектора,
-задаётся измеренным значением (DARK), иначе он коррелирует с a.
+огибающая env (грейтинги/юстировка). offset — тёмновой уровень детектора;
+он НЕ фитируется, а задаётся измеренным значением (--dark, В), иначе он
+коррелировал бы с a. По умолчанию --dark 0.0, т. е. тёмновой уровень в модели
+отсутствует.
 
 Что считается из фита:
     FSR = lambda^2 / (n_g L)
@@ -36,7 +38,7 @@ Q_L и kappa^2; Q_i и потери волновода из такого спе�
 
 Запуск:
     python adddrop_fit.py data/ring_through_example.csv
-    python adddrop_fit.py my.csv --sep ';' --dark 0.0 --ngl0 1200
+    python adddrop_fit.py my.csv --sep ';' --dark 0.0 --ngL0 1200
 """
 
 import argparse
@@ -45,7 +47,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from scipy.optimize import least_squares
-from scipy.signal import find_peaks
+from scipy.signal import find_peaks, peak_widths
 
 # ----------------------------------------------------------------------
 # Загрузка и подготовка
@@ -65,12 +67,68 @@ def load_sweep(path, sep=",", bin_pm=1.0, smooth_pm=60.0):
     cnt = np.bincount(idx, minlength=len(grid) + 1)[1:len(grid) + 1]
     ok = cnt > 0
     lam, T = grid[ok] + step / 2, sums[ok] / cnt[ok]
+    return smooth_trace(lam, T, bin_pm=bin_pm, smooth_pm=smooth_pm)
 
-    k = max(1, int(round(smooth_pm / bin_pm)))
+
+def smooth_window_samples(bin_pm, smooth_pm):
+    """Width of the moving-average window used by smooth_trace, in samples."""
+    return max(1, int(round(smooth_pm / bin_pm)))
+
+
+def smooth_trace(lam, T, bin_pm=1.0, smooth_pm=60.0):
+    """Moving average of width smooth_pm over an already binned trace (the
+    smoothing step of load_sweep). No smoothing if the window rounds to a
+    single sample, e.g. smooth_pm=0."""
+    k = smooth_window_samples(bin_pm, smooth_pm)
     if k > 1:
         T = np.convolve(T, np.ones(k) / k, "same")[k:-k]
         lam = lam[k:-k]
     return lam, T
+
+
+def narrowest_dip_fwhm(lam, T, rel_prominence=0.5):
+    """FWHM of the narrowest resonance dip, in nm, or None if no dip is found.
+
+    Intended for the binned but NOT smoothed trace: a moving average broadens
+    the dips, so measuring on the smoothed trace would hide exactly the
+    problem the smoothing check looks for. The fitted finesse (FWHM = FSR/F)
+    is not used for the same reason -- the fit also sees the smoothed trace --
+    and because FSR/F is the dip width only at high finesse.
+
+    Only dips with prominence >= rel_prominence * (largest prominence) count
+    as resonances; this rejects detector noise and the shallow parasitic
+    Fabry-Perot ripple, which would otherwise be the "narrowest" dips."""
+    if len(T) < 3:
+        return None
+    idx, props = find_peaks(-T, prominence=0.0)
+    if len(idx) == 0:
+        return None
+    prom = props["prominences"]
+    idx = idx[prom >= rel_prominence * prom.max()]
+    _, _, left, right = peak_widths(-T, idx, rel_height=0.5)
+    i = np.arange(len(lam))
+    fwhm = np.interp(right, i, lam) - np.interp(left, i, lam)
+    fwhm = fwhm[fwhm > 0]
+    return float(fwhm.min()) if len(fwhm) else None
+
+
+def check_smoothing(fwhm_nm, bin_pm, smooth_pm, max_fraction=1 / 3):
+    """Return a warning string if the smoothing window is wider than
+    max_fraction of the narrowest resonance FWHM (both in samples of the
+    bin_pm grid), otherwise None. fwhm_nm=None (no dip found) -> None."""
+    if fwhm_nm is None:
+        return None
+    k = smooth_window_samples(bin_pm, smooth_pm)
+    if k <= 1:
+        return None
+    fwhm_samples = fwhm_nm * 1e3 / bin_pm
+    if k <= max_fraction * fwhm_samples:
+        return None
+    return (f"ВНИМАНИЕ: окно сглаживания --smooth {smooth_pm:g} пм ({k} отсч.) "
+            f"шире 1/3 ширины самого узкого резонанса "
+            f"(FWHM ~ {fwhm_nm * 1e3:.0f} пм = {fwhm_samples:.0f} отсч.).\n"
+            f"Сглаживание уширяет резонансы: F и Q_L занижены. "
+            f"Уменьшите --smooth до {max_fraction * fwhm_nm * 1e3:.0f} пм или меньше.")
 
 
 def estimate_ngL(lam, T, ngL_min=100.0, ngL_max=5000.0):
@@ -186,7 +244,8 @@ def print_table(rows):
               "извлечь нельзя\".")
 
 
-def make_figure(lam, T, rows, index=None, path="images/fig_adddrop_fit.png"):
+def make_figure(lam, T, rows, index=None, path="images/fig_adddrop_fit.png",
+                warning=None):
     if index is None:
         index = len(rows) // 2
     r = rows[index]
@@ -211,6 +270,11 @@ def make_figure(lam, T, rows, index=None, path="images/fig_adddrop_fit.png"):
                f"Q_L = {r['Q_L']:.0f}",
                transform=ax[1].transAxes, color="#5A5A5A")
     fig.tight_layout()
+    if warning:
+        # Put the warning on the figure itself so it travels with the output.
+        fig.subplots_adjust(bottom=0.2)
+        fig.text(0.01, 0.01, warning, fontsize=7, color="#B00020",
+                 ha="left", va="bottom")
     import os
     os.makedirs(os.path.dirname(path), exist_ok=True)
     fig.savefig(path, dpi=160)
@@ -218,12 +282,14 @@ def make_figure(lam, T, rows, index=None, path="images/fig_adddrop_fit.png"):
 
 
 # ----------------------------------------------------------------------
-def main():
+def build_parser():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[3])
     ap.add_argument("csv", nargs="?", default="data/ring_through_example.csv")
     ap.add_argument("--sep", default=",", help="разделитель CSV (например ';')")
     ap.add_argument("--dark", type=float, default=0.0,
-                    help="тёмновой уровень детектора; None -> фитируется")
+                    help="тёмновой уровень детектора, В; НЕ фитируется, а "
+                         "добавляется к модели как фиксированное смещение. "
+                         "По умолчанию 0.0 — без тёмнового уровня")
     ap.add_argument("--ngL0", type=float, default=None,
                     help="стартовое n_g*L, мкм (по умолчанию из ПФ)")
     ap.add_argument("--width", type=float, default=15.0, help="ширина окна, нм")
@@ -233,10 +299,17 @@ def main():
                          "при финессе 100+ ставьте единицы пм")
     ap.add_argument("--ngLmax", type=float, default=5000.0,
                     help="верхняя граница поиска n_g*L в ПФ, мкм")
-    args = ap.parse_args()
+    return ap
 
-    lam, T = load_sweep(args.csv, sep=args.sep,
-                        bin_pm=args.bin, smooth_pm=args.smooth)
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+
+    # Bin without smoothing first: the resonance width for the smoothing check
+    # is measured on this trace. Then smooth exactly as load_sweep would.
+    lam_b, T_b = load_sweep(args.csv, sep=args.sep,
+                            bin_pm=args.bin, smooth_pm=0.0)
+    lam, T = smooth_trace(lam_b, T_b, bin_pm=args.bin, smooth_pm=args.smooth)
     ngL0 = args.ngL0 or estimate_ngL(lam, T, ngL_max=args.ngLmax)
     print(f"файл: {args.csv}")
     print(f"диапазон: {lam.min():.1f}–{lam.max():.1f} нм, точек после биннинга: {len(lam)}")
@@ -244,7 +317,11 @@ def main():
 
     rows = characterize(lam, T, ngL0=ngL0, dark=args.dark, width_nm=args.width)
     print_table(rows)
-    make_figure(lam, T, rows)
+    warning = check_smoothing(narrowest_dip_fwhm(lam_b, T_b),
+                              args.bin, args.smooth)
+    if warning:
+        print("\n" + warning)
+    make_figure(lam, T, rows, warning=warning)
 
 
 if __name__ == "__main__":
