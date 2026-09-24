@@ -75,21 +75,38 @@ EOF
 
 ## Step 2b — add-drop / raw-sweep pipeline
 
+First estimate from the raw trace, near the band centre: the dip spacing
+(FSR) and the dip FWHM. **Do not use the script defaults blindly**: the
+default `--smooth 60` smears any dip narrower than ~0.5 nm and biases the
+result silently (on a finesse-70 test sweep it gave 2.8x too much loss and
+half the Q_L, with no warning from the script).
+
 ```bash
 cd "$WORK" && MPLBACKEND=Agg python "$REPO/adddrop_fit.py" /abs/path/INPUT.csv \
-    --sep ',' --dark <dark level> --width 15 --smooth 60
+    --sep ',' --dark <dark level> --width <W> --smooth <S>
+cp images/fig_adddrop_fit.png figs/fig_w<W>_s<S>.png   # the script overwrites it
 ```
 
-Parameter guidance (from the README):
-- `--dark`: the detector dark level. Ask for it or estimate it from the trace
-  (signal with laser off, or the floor outside the band); an unknown dark level
-  trades off against `a`. Say which value you used.
-- `--smooth` must be well below the resonance width. For finesse > ~100 use a
-  few pm (e.g. `--smooth 3`) and narrower windows (`--width 6`).
+Parameter guidance:
+- `--smooth` (pm): at most FWHM/5..FWHM/10. What matters is the smoothing
+  compared with FWHM = FSR/F, not the finesse alone.
+- `--width` (nm): at least 3 FSR. Windows of about 2 FSR can lock onto the
+  n_g*L/2 harmonic; drop any window whose n_g*L departs from the FFT estimate
+  and say so.
+- `--dark`: the detector dark level. Ask for it or estimate it (laser off, or
+  the floor outside the band). Note: the script never fits it; the default
+  0.0 means "no dark level". Check sensitivity by re-running with 0 and ~3x
+  the value.
 - `--ngL0` / `--ngLmax` if the FFT estimate of n_g*L is clearly off (compare
   with the visible dip spacing: FSR = lambda^2 / (n_g L)).
-- If the fit rms is large or kappa^2 / a jump between windows, try one or two
-  sensible parameter variations and report the spread rather than cherry-picking.
+- Always try one or two parameter variations and report the spread rather
+  than cherry-picking.
+- For parameter sweeps and aggregate statistics it is easier to import the
+  module (`load_sweep`, `estimate_ngL`, `characterize`, `figures_of_merit`);
+  nothing is written unless `make_figure` is called.
+- The script does not print ER; compute it from the fitted model
+  (max/min of the lineshape) and say so. It gives n_g*L, not n_g: report
+  n_g*L and ask for the ring length L.
 
 ## Step 3 — sanity checks before reporting
 
@@ -106,6 +123,11 @@ Parameter guidance (from the README):
 - Add-drop, overcoupled (kappa^2 > ~0.2): `a`, `Q_i` and propagation loss are
   **not recoverable** from realistic data; the script's warning is intended.
   In that regime report only `Q_L`, `kappa^2`, FSR, n_g*L as reliable.
+- Add-drop model assumes symmetric couplers (t1 = t2). From the through port
+  alone t2 and `a` are partly degenerate, so even in weak coupling `a`, `Q_i`
+  and loss are "indicative", and kappa^2 is an effective value.
+- The script warns only for kappa^2 > 0.2 or window scatter of `a` > 0.05; it
+  does not catch over-smoothing or a wrong dark level. Those checks are yours.
 - Expected accuracy on clean synthetic data: FSR and n_g ~0.5 %, t/A ~0.2 %,
   Q/ER ~10 %. Real data will be worse; never report more digits than that.
 
