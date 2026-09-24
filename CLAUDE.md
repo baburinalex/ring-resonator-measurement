@@ -10,6 +10,7 @@ Lumerical or other licensed software.
 - make_example_sweep.py  synthesizes sweeps with realistic artefacts (truth is printed)
 - coupler_supermodes.py  scalar FD supermode solve -> kappa^2 from geometry
 - data/, images/, measured_spectrum.csv  committed example data and figures
+- .claude/agents/spectrum-analyst.md  subagent: processes a user's spectrum with these pipelines
 
 ## Commands
 - Setup: `pip install -r requirements.txt`
